@@ -46,7 +46,8 @@ func randomLBPolicy(_ context.Context, targets []*podTracker) (func(), *podTrack
 
 // randomChoice2Policy implements the Power of 2 choices LB algorithm
 func randomChoice2Policy(ctx context.Context, targets []*podTracker) (func(), *podTracker) {
-	if pick := getSession(ctx, targets); pick != nil {
+	session, dest, pick := getSession(ctx, targets)
+	if pick != nil {
 		return noop, pick
 	}
 
@@ -55,7 +56,7 @@ func randomChoice2Policy(ctx context.Context, targets []*podTracker) (func(), *p
 	// One tracker = no choice.
 	if l == 1 {
 		pick := targets[0]
-		if !setSession(ctx, pick) {
+		if !setSession(ctx, session, dest, pick) {
 			return noop, nil
 		}
 		pick.increaseWeight()
@@ -80,7 +81,7 @@ func randomChoice2Policy(ctx context.Context, targets []*podTracker) (func(), *p
 	if pick.getWeight() > alt.getWeight() {
 		pick = alt
 	}
-	if !setSession(ctx, pick) {
+	if !setSession(ctx, session, dest, pick) {
 		return noop, nil
 	}
 	pick.increaseWeight()
@@ -90,13 +91,14 @@ func randomChoice2Policy(ctx context.Context, targets []*podTracker) (func(), *p
 // firstAvailableLBPolicy is a load balancer policy, that picks the first target
 // that has capacity to serve the request right now.
 func firstAvailableLBPolicy(ctx context.Context, targets []*podTracker) (func(), *podTracker) {
-	if pick := getSession(ctx, targets); pick != nil {
+	session, dest, pick := getSession(ctx, targets)
+	if pick != nil {
 		return noop, pick
 	}
 
 	for _, t := range targets {
 		if cb, ok := t.Reserve(ctx); ok {
-			if !setSession(ctx, t) {
+			if !setSession(ctx, session, dest, t) {
 				cb()
 				return noop, nil
 			}
@@ -112,7 +114,8 @@ func newRoundRobinPolicy() lbPolicy {
 		idx int
 	)
 	return func(ctx context.Context, targets []*podTracker) (func(), *podTracker) {
-		if pick := getSession(ctx, targets); pick != nil {
+		session, dest, pick := getSession(ctx, targets)
+		if pick != nil {
 			return noop, pick
 		}
 
@@ -130,7 +133,7 @@ func newRoundRobinPolicy() lbPolicy {
 		for i := 0; i < l; i++ {
 			p := (idx + i) % l
 			if cb, ok := targets[p].Reserve(ctx); ok {
-				if !setSession(ctx, targets[p]) {
+				if !setSession(ctx, session, dest, targets[p]) {
 					cb()
 					return noop, nil
 				}
@@ -188,28 +191,27 @@ func sessionFrom(ctx context.Context) string {
 }
 
 // get pod for session
-func getSession(ctx context.Context, targets []*podTracker) *podTracker {
-	if session := sessionFrom(ctx); session != "" {
-		dest, _ := store.Get(ctx, session)
-		if dest != "" {
-			for _, t := range targets {
-				if dest == t.dest {
-					return t
-				}
+func getSession(ctx context.Context, targets []*podTracker) (string, string, *podTracker) {
+	session := sessionFrom(ctx)
+	if session == "" {
+		return "", "", nil
+	}
+	dest, _ := store.Get(ctx, session)
+	if dest != "" {
+		for _, t := range targets {
+			if dest == t.dest {
+				return session, dest, t
 			}
 		}
-		store.Del(ctx, session, dest)
 	}
-	return nil
+	return session, dest, nil
 }
 
 // set pod for session
-func setSession(ctx context.Context, pick *podTracker) bool {
-	if session := sessionFrom(ctx); session != "" {
-		if dest, _ := store.Get(ctx, session); dest != "" && dest != pick.dest {
-			return false
-		}
-		store.Set(ctx, session, pick.dest)
+func setSession(ctx context.Context, session string, dest string, pick *podTracker) bool {
+	if session == "" {
+		return true
 	}
-	return true
+	b, _ := store.CAS(ctx, session, dest, pick.dest)
+	return b
 }
