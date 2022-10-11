@@ -112,12 +112,12 @@ func newRoundRobinPolicy() lbPolicy {
 		idx int
 	)
 	return func(ctx context.Context, targets []*podTracker) (func(), *podTracker) {
-		mu.Lock()
-		defer mu.Unlock()
-
 		if pick := getSession(ctx, targets); pick != nil {
 			return noop, pick
 		}
+
+		mu.Lock()
+		defer mu.Unlock()
 
 		// The number of trackers might have shrunk, so reset to 0.
 		l := len(targets)
