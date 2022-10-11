@@ -20,6 +20,7 @@ package net
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
 	"net/http"
 	"strconv"
@@ -155,14 +156,14 @@ func WithRequestAndAnnotations(ctx context.Context, r *http.Request, a map[strin
 	return context.WithValue(ctx, key{}, pair{r, a})
 }
 
-// get session id from request from context
-func sessionIdFrom(ctx context.Context) string {
+// get session from context
+func sessionFrom(ctx context.Context) string {
 	p := ctx.Value(key{}).(pair)
 	request := p.Request
 	annotations := p.Annotations
 
-	if sessionId := request.Header.Get("K-Session"); sessionId != "" {
-		return sessionId
+	if session := request.Header.Get("K-Session"); session != "" {
+		return session
 	}
 
 	if p := annotations["activator.knative.dev/session-header"]; p != "" {
@@ -185,36 +186,30 @@ func sessionIdFrom(ctx context.Context) string {
 	return ""
 }
 
-// sync map from session id to pod tracker
-var sessions = map[string]*podTracker{}
-var mu sync.Mutex
-
-// get pod for session from context
+// get pod for session
 func getSession(ctx context.Context, targets []*podTracker) *podTracker {
-	if sessionId := sessionIdFrom(ctx); sessionId != "" {
-		mu.Lock()
-		defer mu.Unlock()
-		if session := sessions[sessionId]; session != nil {
+	fmt.Println("HERE", targets)
+	if session := sessionFrom(ctx); session != "" {
+		dest, _ := StoreGet(ctx, session)
+		if dest != "" {
 			for _, t := range targets {
-				if session == t {
+				if dest == t.dest {
 					return t
 				}
 			}
 		}
-		delete(sessions, sessionId)
+		StoreDel(ctx, session, dest)
 	}
 	return nil
 }
 
 // set pod for session
 func setSession(ctx context.Context, pick *podTracker) bool {
-	if sessionId := sessionIdFrom(ctx); sessionId != "" {
-		mu.Lock()
-		defer mu.Unlock()
-		if session := sessions[sessionId]; session != nil && session != pick {
+	if session := sessionFrom(ctx); session != "" {
+		if dest, _ := StoreGet(ctx, session); dest != "" && dest != pick.dest {
 			return false
 		}
-		sessions[sessionId] = pick
+		StoreSet(ctx, session, pick.dest)
 	}
 	return true
 }

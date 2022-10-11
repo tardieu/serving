@@ -194,6 +194,13 @@ func main() {
 	throttler := activatornet.NewThrottler(ctx, env.PodIP)
 	go throttler.Run(ctx, transport, networkConfig.EnableMeshPodAddressability, networkConfig.MeshCompatibilityMode)
 
+	// Connect to Redis.
+	err = activatornet.StoreDial(ctx)
+	if err != nil {
+		logger.Fatalw("Failed to connect to Redis", zap.Error(err))
+	}
+	defer activatornet.StoreClose()
+
 	oct := tracing.NewOpenCensusTracer(tracing.WithExporterFull(networking.ActivatorServiceName, env.PodIP, logger))
 	defer oct.Shutdown(context.Background())
 
