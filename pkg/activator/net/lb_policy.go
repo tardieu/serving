@@ -20,12 +20,13 @@ package net
 
 import (
 	"context"
-	"fmt"
 	"math/rand"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
+
+	"knative.dev/serving/pkg/activator/store"
 )
 
 // lbPolicy is a functor that selects a target pod from the list, or (noop, nil) if
@@ -188,9 +189,8 @@ func sessionFrom(ctx context.Context) string {
 
 // get pod for session
 func getSession(ctx context.Context, targets []*podTracker) *podTracker {
-	fmt.Println("HERE", targets)
 	if session := sessionFrom(ctx); session != "" {
-		dest, _ := StoreGet(ctx, session)
+		dest, _ := store.Get(ctx, session)
 		if dest != "" {
 			for _, t := range targets {
 				if dest == t.dest {
@@ -198,7 +198,7 @@ func getSession(ctx context.Context, targets []*podTracker) *podTracker {
 				}
 			}
 		}
-		StoreDel(ctx, session, dest)
+		store.Del(ctx, session, dest)
 	}
 	return nil
 }
@@ -206,10 +206,10 @@ func getSession(ctx context.Context, targets []*podTracker) *podTracker {
 // set pod for session
 func setSession(ctx context.Context, pick *podTracker) bool {
 	if session := sessionFrom(ctx); session != "" {
-		if dest, _ := StoreGet(ctx, session); dest != "" && dest != pick.dest {
+		if dest, _ := store.Get(ctx, session); dest != "" && dest != pick.dest {
 			return false
 		}
-		StoreSet(ctx, session, pick.dest)
+		store.Set(ctx, session, pick.dest)
 	}
 	return true
 }

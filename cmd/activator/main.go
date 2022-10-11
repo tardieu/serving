@@ -63,6 +63,7 @@ import (
 	activatorconfig "knative.dev/serving/pkg/activator/config"
 	activatorhandler "knative.dev/serving/pkg/activator/handler"
 	activatornet "knative.dev/serving/pkg/activator/net"
+	activatorstore "knative.dev/serving/pkg/activator/store"
 	apiconfig "knative.dev/serving/pkg/apis/config"
 	asmetrics "knative.dev/serving/pkg/autoscaler/metrics"
 	pkghttp "knative.dev/serving/pkg/http"
@@ -195,11 +196,11 @@ func main() {
 	go throttler.Run(ctx, transport, networkConfig.EnableMeshPodAddressability, networkConfig.MeshCompatibilityMode)
 
 	// Connect to Redis.
-	err = activatornet.StoreDial(ctx)
+	err = activatorstore.Dial(ctx)
 	if err != nil {
 		logger.Fatalw("Failed to connect to Redis", zap.Error(err))
 	}
-	defer activatornet.StoreClose()
+	defer activatorstore.Close()
 
 	oct := tracing.NewOpenCensusTracer(tracing.WithExporterFull(networking.ActivatorServiceName, env.PodIP, logger))
 	defer oct.Shutdown(context.Background())
