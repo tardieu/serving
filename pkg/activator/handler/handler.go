@@ -37,6 +37,7 @@ import (
 	"knative.dev/pkg/tracing/propagation/tracecontextb3"
 	"knative.dev/serving/pkg/activator"
 	activatorconfig "knative.dev/serving/pkg/activator/config"
+	"knative.dev/serving/pkg/activator/net"
 	pkghttp "knative.dev/serving/pkg/http"
 	"knative.dev/serving/pkg/networking"
 	"knative.dev/serving/pkg/queue"
@@ -86,7 +87,7 @@ func (a *activationHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	revID := RevIDFrom(r.Context())
-	if err := a.throttler.Try(tryContext, revID, func(dest string) error {
+	if err := a.throttler.Try(net.WithRequestAndAnnotations(tryContext, r, RevisionFrom(tryContext).Annotations), revID, func(dest string) error {
 		trySpan.End()
 
 		proxyCtx, proxySpan := r.Context(), (*trace.Span)(nil)

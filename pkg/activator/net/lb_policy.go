@@ -21,6 +21,9 @@ package net
 import (
 	"context"
 	"math/rand"
+	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -34,18 +37,25 @@ type lbPolicy func(ctx context.Context, targets []*podTracker) (func(), *podTrac
 // randomLBPolicy is a load balancer policy that picks a random target.
 // This approximates the LB policy done by K8s Service (IPTables based).
 //
-//nolint // This is currently unused but kept here for posterity.
+// nolint // This is currently unused but kept here for posterity.
 func randomLBPolicy(_ context.Context, targets []*podTracker) (func(), *podTracker) {
 	return noop, targets[rand.Intn(len(targets))]
 }
 
 // randomChoice2Policy implements the Power of 2 choices LB algorithm
-func randomChoice2Policy(_ context.Context, targets []*podTracker) (func(), *podTracker) {
+func randomChoice2Policy(ctx context.Context, targets []*podTracker) (func(), *podTracker) {
+	if pick := getSession(ctx, targets); pick != nil {
+		return noop, pick
+	}
+
 	// Avoid random if possible.
 	l := len(targets)
 	// One tracker = no choice.
 	if l == 1 {
 		pick := targets[0]
+		if !setSession(ctx, pick) {
+			return noop, nil
+		}
 		pick.increaseWeight()
 		return pick.decreaseWeight, pick
 	}
@@ -68,6 +78,9 @@ func randomChoice2Policy(_ context.Context, targets []*podTracker) (func(), *pod
 	if pick.getWeight() > alt.getWeight() {
 		pick = alt
 	}
+	if !setSession(ctx, pick) {
+		return noop, nil
+	}
 	pick.increaseWeight()
 	return pick.decreaseWeight, pick
 }
@@ -75,8 +88,16 @@ func randomChoice2Policy(_ context.Context, targets []*podTracker) (func(), *pod
 // firstAvailableLBPolicy is a load balancer policy, that picks the first target
 // that has capacity to serve the request right now.
 func firstAvailableLBPolicy(ctx context.Context, targets []*podTracker) (func(), *podTracker) {
+	if pick := getSession(ctx, targets); pick != nil {
+		return noop, pick
+	}
+
 	for _, t := range targets {
 		if cb, ok := t.Reserve(ctx); ok {
+			if !setSession(ctx, t) {
+				cb()
+				return noop, nil
+			}
 			return cb, t
 		}
 	}
@@ -91,6 +112,11 @@ func newRoundRobinPolicy() lbPolicy {
 	return func(ctx context.Context, targets []*podTracker) (func(), *podTracker) {
 		mu.Lock()
 		defer mu.Unlock()
+
+		if pick := getSession(ctx, targets); pick != nil {
+			return noop, pick
+		}
+
 		// The number of trackers might have shrunk, so reset to 0.
 		l := len(targets)
 		if idx >= l {
@@ -102,6 +128,10 @@ func newRoundRobinPolicy() lbPolicy {
 		for i := 0; i < l; i++ {
 			p := (idx + i) % l
 			if cb, ok := targets[p].Reserve(ctx); ok {
+				if !setSession(ctx, targets[p]) {
+					cb()
+					return noop, nil
+				}
 				// We want to start with the next index.
 				idx = p + 1
 				return cb, targets[p]
@@ -110,4 +140,81 @@ func newRoundRobinPolicy() lbPolicy {
 		// We exhausted all the options...
 		return noop, nil
 	}
+}
+
+type pair struct {
+	Request     *http.Request
+	Annotations map[string]string
+}
+
+// private key type to attach to context
+type key struct{}
+
+// attach request and rev annotations to context
+func WithRequestAndAnnotations(ctx context.Context, r *http.Request, a map[string]string) context.Context {
+	return context.WithValue(ctx, key{}, pair{r, a})
+}
+
+// get session id from request from context
+func sessionIdFrom(ctx context.Context) string {
+	p := ctx.Value(key{}).(pair)
+	request := p.Request
+	annotations := p.Annotations
+
+	if sessionId := request.Header.Get("K-Session"); sessionId != "" {
+		return sessionId
+	}
+
+	if p := annotations["activator.knative.dev/session-header"]; p != "" {
+		return request.Header.Get(p)
+	}
+
+	if p := annotations["activator.knative.dev/session-query"]; p != "" {
+		return request.URL.Query().Get(p)
+	}
+
+	if p := annotations["activator.knative.dev/session-path"]; p != "" {
+		if n, err := strconv.Atoi(p); err == nil {
+			parts := strings.Split(strings.TrimPrefix(request.URL.Path, "/"), "/")
+			if n < len(parts) {
+				return parts[n]
+			}
+		}
+	}
+
+	return ""
+}
+
+// sync map from session id to pod tracker
+var sessions = map[string]*podTracker{}
+var mu sync.Mutex
+
+// get pod for session from context
+func getSession(ctx context.Context, targets []*podTracker) *podTracker {
+	if sessionId := sessionIdFrom(ctx); sessionId != "" {
+		mu.Lock()
+		defer mu.Unlock()
+		if session := sessions[sessionId]; session != nil {
+			for _, t := range targets {
+				if session == t {
+					return t
+				}
+			}
+		}
+		delete(sessions, sessionId)
+	}
+	return nil
+}
+
+// set pod for session
+func setSession(ctx context.Context, pick *podTracker) bool {
+	if sessionId := sessionIdFrom(ctx); sessionId != "" {
+		mu.Lock()
+		defer mu.Unlock()
+		if session := sessions[sessionId]; session != nil && session != pick {
+			return false
+		}
+		sessions[sessionId] = pick
+	}
+	return true
 }
