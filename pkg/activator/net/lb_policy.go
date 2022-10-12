@@ -147,42 +147,54 @@ func newRoundRobinPolicy() lbPolicy {
 	}
 }
 
-type pair struct {
+// context value
+type ctxValue struct {
 	Request     *http.Request
 	Annotations map[string]string
 }
 
-// private key type to attach to context
+// private key type to attach context value to context
 type key struct{}
 
 // attach request and rev annotations to context
 func WithRequestAndAnnotations(ctx context.Context, r *http.Request, a map[string]string) context.Context {
-	return context.WithValue(ctx, key{}, pair{r, a})
+	return context.WithValue(ctx, key{}, ctxValue{r, a})
+}
+
+const sessionHeader = "K-Session"
+
+// inject session header into request before forwarding request
+func addSessionHeader(r *http.Request, session string) string {
+	if session != "" {
+		r.Header.Add(sessionHeader, session)
+	}
+	return session
 }
 
 // get session from context
 func sessionFrom(ctx context.Context) string {
-	p := ctx.Value(key{}).(pair)
+	p := ctx.Value(key{}).(ctxValue)
 	request := p.Request
 	annotations := p.Annotations
 
-	if session := request.Header.Get("K-Session"); session != "" {
+	if session := request.Header.Get(sessionHeader); session != "" {
 		return session
 	}
 
 	if p := annotations["activator.knative.dev/session-header"]; p != "" {
-		return request.Header.Get(p)
+		return addSessionHeader(request, request.Header.Get(p))
+
 	}
 
 	if p := annotations["activator.knative.dev/session-query"]; p != "" {
-		return request.URL.Query().Get(p)
+		return addSessionHeader(request, request.URL.Query().Get(p))
 	}
 
 	if p := annotations["activator.knative.dev/session-path"]; p != "" {
 		if n, err := strconv.Atoi(p); err == nil {
 			parts := strings.Split(strings.TrimPrefix(request.URL.Path, "/"), "/")
 			if n < len(parts) {
-				return parts[n]
+				return addSessionHeader(request, parts[n])
 			}
 		}
 	}
