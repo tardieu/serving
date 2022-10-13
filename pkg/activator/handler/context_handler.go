@@ -33,6 +33,7 @@ import (
 	"knative.dev/serving/pkg/activator"
 	activatorconfig "knative.dev/serving/pkg/activator/config"
 	"knative.dev/serving/pkg/activator/store"
+	"knative.dev/serving/pkg/apis/serving"
 	revisioninformer "knative.dev/serving/pkg/client/injection/informers/serving/v1/revision"
 	serviceinformer "knative.dev/serving/pkg/client/injection/informers/serving/v1/service"
 	servinglisters "knative.dev/serving/pkg/client/listers/serving/v1"
@@ -81,7 +82,7 @@ func (h *contextHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	serviceName := revision.Labels["serving.knative.dev/service"]
+	serviceName := revision.Labels[serving.ServiceLabelKey]
 	service, err := h.serviceLister.Services(namespace).Get(serviceName)
 	if err != nil {
 		h.logger.Errorw("Error while getting service", zap.String(logkey.Key, serviceName), zap.Error(err))
@@ -142,19 +143,36 @@ func getSession(r *http.Request, annotations map[string]string) string {
 		return session
 	}
 
-	if p := annotations["activator.knative.dev/session-header"]; p != "" {
+	if p := annotations["activator.knative.dev/sticky-session-header-name"]; p != "" {
 		return addStickySessionHeader(r, r.Header.Get(p))
 	}
 
-	if p := annotations["activator.knative.dev/session-query"]; p != "" {
+	if p := annotations["activator.knative.dev/sticky-session-query-parameter"]; p != "" {
 		return addStickySessionHeader(r, r.URL.Query().Get(p))
 	}
 
-	if p := annotations["activator.knative.dev/session-path"]; p != "" {
+	if p := annotations["activator.knative.dev/sticky-session-path-segment"]; p != "" {
 		if n, err := strconv.Atoi(p); err == nil {
 			parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
 			if n < len(parts) {
 				return addStickySessionHeader(r, parts[n])
+			}
+		}
+	}
+
+	if p := annotations["activator.knative.dev/sticky-revision-header-name"]; p != "" {
+		return r.Header.Get(p)
+	}
+
+	if p := annotations["activator.knative.dev/sticky-revision-query-parameter"]; p != "" {
+		return r.URL.Query().Get(p)
+	}
+
+	if p := annotations["activator.knative.dev/sticky-revision-path-segment"]; p != "" {
+		if n, err := strconv.Atoi(p); err == nil {
+			parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+			if n < len(parts) {
+				return parts[n]
 			}
 		}
 	}
