@@ -41,7 +41,7 @@ func Get(ctx context.Context, key string) (string, error) {
 	return redis.String(conn.Do("GET", key))
 }
 
-func CAS(ctx context.Context, key, expected, desired string) (bool, error) {
-	script := "local v=redis.call('GET', KEYS[1]); if v==ARGV[1] or v==false and ARGV[1]=='' then redis.call('SET', KEYS[1], ARGV[2]); return 1 else return 0 end"
-	return redis.Bool(conn.Do("EVAL", script, 1, key, expected, desired))
+func CAS(ctx context.Context, key, expected, desired string) (string, error) {
+	script := "local v=redis.call('GET', KEYS[1]); if v==ARGV[1] or v==false and ARGV[1]=='' then redis.call('SET', KEYS[1], ARGV[2]); return ARGV[2] else return v end"
+	return redis.String(conn.Do("EVAL", script, 1, key, expected, desired))
 }

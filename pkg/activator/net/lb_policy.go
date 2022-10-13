@@ -21,9 +21,6 @@ package net
 import (
 	"context"
 	"math/rand"
-	"net/http"
-	"strconv"
-	"strings"
 	"sync"
 
 	"knative.dev/serving/pkg/activator/store"
@@ -46,7 +43,7 @@ func randomLBPolicy(_ context.Context, targets []*podTracker) (func(), *podTrack
 
 // randomChoice2Policy implements the Power of 2 choices LB algorithm
 func randomChoice2Policy(ctx context.Context, targets []*podTracker) (func(), *podTracker) {
-	session, dest, pick := getSession(ctx, targets)
+	dest, pick := getSession(ctx, targets)
 	if pick != nil {
 		return noop, pick
 	}
@@ -56,7 +53,7 @@ func randomChoice2Policy(ctx context.Context, targets []*podTracker) (func(), *p
 	// One tracker = no choice.
 	if l == 1 {
 		pick := targets[0]
-		if !setSession(ctx, session, dest, pick) {
+		if !setSession(ctx, dest, pick) {
 			return noop, nil
 		}
 		pick.increaseWeight()
@@ -81,7 +78,7 @@ func randomChoice2Policy(ctx context.Context, targets []*podTracker) (func(), *p
 	if pick.getWeight() > alt.getWeight() {
 		pick = alt
 	}
-	if !setSession(ctx, session, dest, pick) {
+	if !setSession(ctx, dest, pick) {
 		return noop, nil
 	}
 	pick.increaseWeight()
@@ -91,14 +88,14 @@ func randomChoice2Policy(ctx context.Context, targets []*podTracker) (func(), *p
 // firstAvailableLBPolicy is a load balancer policy, that picks the first target
 // that has capacity to serve the request right now.
 func firstAvailableLBPolicy(ctx context.Context, targets []*podTracker) (func(), *podTracker) {
-	session, dest, pick := getSession(ctx, targets)
+	dest, pick := getSession(ctx, targets)
 	if pick != nil {
 		return noop, pick
 	}
 
 	for _, t := range targets {
 		if cb, ok := t.Reserve(ctx); ok {
-			if !setSession(ctx, session, dest, t) {
+			if !setSession(ctx, dest, t) {
 				cb()
 				return noop, nil
 			}
@@ -114,7 +111,7 @@ func newRoundRobinPolicy() lbPolicy {
 		idx int
 	)
 	return func(ctx context.Context, targets []*podTracker) (func(), *podTracker) {
-		session, dest, pick := getSession(ctx, targets)
+		dest, pick := getSession(ctx, targets)
 		if pick != nil {
 			return noop, pick
 		}
@@ -133,7 +130,7 @@ func newRoundRobinPolicy() lbPolicy {
 		for i := 0; i < l; i++ {
 			p := (idx + i) % l
 			if cb, ok := targets[p].Reserve(ctx); ok {
-				if !setSession(ctx, session, dest, targets[p]) {
+				if !setSession(ctx, dest, targets[p]) {
 					cb()
 					return noop, nil
 				}
@@ -147,83 +144,42 @@ func newRoundRobinPolicy() lbPolicy {
 	}
 }
 
-// context value
-type ctxValue struct {
-	Request     *http.Request
-	Annotations map[string]string
-}
-
-// private key type to attach context value to context
+// private key type to attach value to context
 type key struct{}
 
-// attach request and rev annotations to context
-func WithRequestAndAnnotations(ctx context.Context, r *http.Request, a map[string]string) context.Context {
-	return context.WithValue(ctx, key{}, ctxValue{r, a})
-}
-
-const sessionHeader = "K-Session"
-
-// inject session header into request before forwarding request
-func addSessionHeader(r *http.Request, session string) string {
-	if session != "" {
-		r.Header.Add(sessionHeader, session)
-	}
-	return session
+// attach session to context
+func WithSession(ctx context.Context, session string) context.Context {
+	return context.WithValue(ctx, key{}, session)
 }
 
 // get session from context
-func sessionFrom(ctx context.Context) string {
-	p := ctx.Value(key{}).(ctxValue)
-	request := p.Request
-	annotations := p.Annotations
-
-	if session := request.Header.Get(sessionHeader); session != "" {
-		return session
-	}
-
-	if p := annotations["activator.knative.dev/session-header"]; p != "" {
-		return addSessionHeader(request, request.Header.Get(p))
-
-	}
-
-	if p := annotations["activator.knative.dev/session-query"]; p != "" {
-		return addSessionHeader(request, request.URL.Query().Get(p))
-	}
-
-	if p := annotations["activator.knative.dev/session-path"]; p != "" {
-		if n, err := strconv.Atoi(p); err == nil {
-			parts := strings.Split(strings.TrimPrefix(request.URL.Path, "/"), "/")
-			if n < len(parts) {
-				return addSessionHeader(request, parts[n])
-			}
-		}
-	}
-
-	return ""
+func SessionFrom(ctx context.Context) string {
+	return ctx.Value(key{}).(string)
 }
 
 // get pod for session
-func getSession(ctx context.Context, targets []*podTracker) (string, string, *podTracker) {
-	session := sessionFrom(ctx)
+func getSession(ctx context.Context, targets []*podTracker) (string, *podTracker) {
+	session := SessionFrom(ctx)
 	if session == "" {
-		return "", "", nil
+		return "", nil // no session
 	}
-	dest, _ := store.Get(ctx, session)
+	dest, _ := store.Get(ctx, "pod/"+session)
 	if dest != "" {
 		for _, t := range targets {
 			if dest == t.dest {
-				return session, dest, t
+				return dest, t // dest is valid
 			}
 		}
 	}
-	return session, dest, nil
+	return dest, nil // dest is invalid
 }
 
 // set pod for session
-func setSession(ctx context.Context, session string, dest string, pick *podTracker) bool {
+func setSession(ctx context.Context, dest string, pick *podTracker) bool {
+	session := SessionFrom(ctx)
 	if session == "" {
 		return true
 	}
-	b, _ := store.CAS(ctx, session, dest, pick.dest)
-	return b
+	b, _ := store.CAS(ctx, "pod/"+session, dest, pick.dest)
+	return b == pick.dest
 }

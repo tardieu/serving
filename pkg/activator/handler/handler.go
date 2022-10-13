@@ -87,7 +87,7 @@ func (a *activationHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	revID := RevIDFrom(r.Context())
-	if err := a.throttler.Try(net.WithRequestAndAnnotations(tryContext, r, RevisionFrom(tryContext).Annotations), revID, func(dest string) error {
+	if err := a.throttler.Try(net.WithSession(tryContext, r.Header.Get(stickySessionHeaderName)), revID, func(dest string) error {
 		trySpan.End()
 
 		proxyCtx, proxySpan := r.Context(), (*trace.Span)(nil)

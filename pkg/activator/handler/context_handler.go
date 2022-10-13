@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"go.uber.org/zap"
@@ -31,7 +32,9 @@ import (
 	network "knative.dev/pkg/network"
 	"knative.dev/serving/pkg/activator"
 	activatorconfig "knative.dev/serving/pkg/activator/config"
+	"knative.dev/serving/pkg/activator/store"
 	revisioninformer "knative.dev/serving/pkg/client/injection/informers/serving/v1/revision"
+	serviceinformer "knative.dev/serving/pkg/client/injection/informers/serving/v1/service"
 	servinglisters "knative.dev/serving/pkg/client/listers/serving/v1"
 )
 
@@ -41,6 +44,7 @@ func NewContextHandler(ctx context.Context, next http.Handler, store *activatorc
 	return &contextHandler{
 		nextHandler:    next,
 		revisionLister: revisioninformer.Get(ctx).Lister(),
+		serviceLister:  serviceinformer.Get(ctx).Lister(),
 		logger:         logging.FromContext(ctx),
 		store:          store,
 	}
@@ -49,6 +53,7 @@ func NewContextHandler(ctx context.Context, next http.Handler, store *activatorc
 // contextHandler enriches the request's context with structured data.
 type contextHandler struct {
 	revisionLister servinglisters.RevisionLister
+	serviceLister  servinglisters.ServiceLister
 	logger         *zap.SugaredLogger
 	nextHandler    http.Handler
 	store          *activatorconfig.Store
@@ -76,6 +81,37 @@ func (h *contextHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	serviceName := revision.Labels["serving.knative.dev/service"]
+	service, err := h.serviceLister.Services(namespace).Get(serviceName)
+	if err != nil {
+		h.logger.Errorw("Error while getting service", zap.String(logkey.Key, serviceName), zap.Error(err))
+		sendError(err, w)
+		return
+	}
+
+	session := getSession(r, service.Annotations)
+	if session != "" {
+		v := ""
+		for {
+			v, _ = store.CAS(r.Context(), "rev/"+session, v, revID.String())
+			if v == revID.String() {
+				break
+			}
+			parts := strings.SplitN(v, string(types.Separator), 2)
+			namespace := parts[0]
+			name := parts[1]
+			stickyRevID := types.NamespacedName{Namespace: namespace, Name: name}
+			stickyRevision, err := h.revisionLister.Revisions(namespace).Get(name)
+			if err == nil {
+				h.logger.Infof("Overriding revision %s with %s", revID.String(), stickyRevID.String())
+				revID = stickyRevID
+				revision = stickyRevision
+				break
+			}
+			h.logger.Warnw("Error while getting sticky revision", zap.String(logkey.Key, v), zap.Error(err))
+		}
+	}
+
 	ctx := r.Context()
 	ctx = WithRevisionAndID(ctx, revision, revID)
 	ctx = h.store.ToContext(ctx)
@@ -89,4 +125,39 @@ func sendError(err error, w http.ResponseWriter) {
 		return
 	}
 	http.Error(w, msg, http.StatusInternalServerError)
+}
+
+const stickySessionHeaderName = "K-Session"
+const stickyRevisionHeaderName = "K-Revision"
+
+func addStickySessionHeader(r *http.Request, session string) string {
+	if session != "" {
+		r.Header.Add(stickySessionHeaderName, session)
+	}
+	return session
+}
+
+func getSession(r *http.Request, annotations map[string]string) string {
+	if session := r.Header.Get(stickySessionHeaderName); session != "" {
+		return session
+	}
+
+	if p := annotations["activator.knative.dev/session-header"]; p != "" {
+		return addStickySessionHeader(r, r.Header.Get(p))
+	}
+
+	if p := annotations["activator.knative.dev/session-query"]; p != "" {
+		return addStickySessionHeader(r, r.URL.Query().Get(p))
+	}
+
+	if p := annotations["activator.knative.dev/session-path"]; p != "" {
+		if n, err := strconv.Atoi(p); err == nil {
+			parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+			if n < len(parts) {
+				return addStickySessionHeader(r, parts[n])
+			}
+		}
+	}
+
+	return r.Header.Get(stickyRevisionHeaderName)
 }
