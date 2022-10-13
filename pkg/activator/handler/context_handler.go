@@ -139,6 +139,10 @@ func addStickySessionHeader(r *http.Request, session string) string {
 }
 
 func getSession(r *http.Request, annotations map[string]string) string {
+	if p := annotations["activator.knative.dev/deactivate"]; p != "" {
+		r.Header.Add("K-Deactivate", p)
+	}
+
 	if session := r.Header.Get(stickySessionHeaderName); session != "" {
 		return session
 	}

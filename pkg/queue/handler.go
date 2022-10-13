@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"path"
+	"sync"
 	"time"
 
 	"go.opencensus.io/trace"
@@ -32,6 +34,7 @@ import (
 // the passed `breaker`, while recording stats to `stats`.
 func ProxyHandler(breaker *Breaker, stats *netstats.RequestStats, tracingEnabled bool, next http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+
 		if netheader.IsKubeletProbe(r) {
 			next.ServeHTTP(w, r)
 			return
@@ -53,6 +56,13 @@ func ProxyHandler(breaker *Breaker, stats *netstats.RequestStats, tracingEnabled
 			stats.HandleEvent(netstats.ReqEvent{Time: time.Now(), Type: out})
 		}()
 		netheader.RewriteHostOut(r)
+
+		if url := r.Header.Get("K-Deactivate"); url != "" {
+			if session := r.Header.Get("K-Session"); session != "" {
+				tasks.Store(session, &task{deadline: time.Now().Add(time.Minute), url: url})
+			}
+			r.Header.Del("K-Deactivate")
+		}
 
 		// Enforce queuing and concurrency limits.
 		if breaker != nil {
@@ -77,3 +87,36 @@ func ProxyHandler(breaker *Breaker, stats *netstats.RequestStats, tracingEnabled
 		}
 	}
 }
+
+func GC(ctx context.Context, target string) {
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				now := time.Now()
+				tasks.Range(func(session any, v any) bool {
+					task := v.(*task)
+					if task.deadline.Before(now) {
+						tasks.Delete(session)
+						url := "http://" + path.Join(target, task.url, session.(string))
+						req, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
+						if err == nil {
+							http.DefaultClient.Do(req)
+						}
+					}
+					return true
+				})
+			}
+		}
+	}()
+}
+
+type task struct {
+	deadline time.Time
+	url      string
+}
+
+var tasks = sync.Map{}

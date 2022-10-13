@@ -213,6 +213,9 @@ func Main(opts ...Option) error {
 	// Report stats on Go memory usage every 30 seconds.
 	metrics.MemStatsOrDie(d.Ctx)
 
+	// Start GC
+	queue.GC(d.Ctx, net.JoinHostPort("127.0.0.1", env.UserPort))
+
 	protoStatReporter := queue.NewProtobufStatsReporter(env.ServingPod, reportingPeriod)
 
 	reportTicker := time.NewTicker(reportingPeriod)
